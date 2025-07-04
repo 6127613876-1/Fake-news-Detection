@@ -18,6 +18,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import string
 import google.generativeai as genai
+import os
 
 nltk.download('punkt')
 nltk.download('stopwords')
@@ -33,7 +34,7 @@ max_length = 5000  # Set the maximum sequence length based on your training
 similarity_threshold = 0.7  # Define similarity threshold for matching
 
 # Initialize Gemini Pro API
-genai.configure(api_key="AIzaSyBvxyDsdmx58DWtzJOgaygRWdqwSKsYGBs")  # Replace with your Gemini API key
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))  # Replace with your Gemini API key
 
 # Website configurations
 WEB_CONFIG = {
