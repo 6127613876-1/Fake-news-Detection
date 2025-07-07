@@ -1,21 +1,25 @@
+# app.py
+
 from flask import Flask, request, render_template_string
 import pandas as pd
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-import threading
-import time
 import os
 import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import time
+import threading
 import requests
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 
-# NLTK setup (avoid redownloads)
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# === Configuration ===
+app = Flask(__name__)
 nltk_data_path = os.path.join(os.path.expanduser("~"), "nltk_data")
 nltk.data.path.append(nltk_data_path)
 for pkg in ["punkt", "stopwords"]:
@@ -24,19 +28,17 @@ for pkg in ["punkt", "stopwords"]:
     except LookupError:
         nltk.download(pkg, download_dir=nltk_data_path)
 
-app = Flask(__name__)
-
-# Globals
-news_data = {}
+# === Globals ===
 model = None
 TOKENIZER = None
-max_length = 5000
+news_data = {}
+max_length = 200
 similarity_threshold = 0.7
 
-# Gemini
+# === Google Gemini ===
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# HTML Template
+# === HTML Template ===
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -65,6 +67,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# === Web Crawler Sources ===
 WEB_CONFIG = {
     "BBC": {
         "url": "https://www.bbc.com/news",
@@ -83,101 +86,118 @@ WEB_CONFIG = {
     }
 }
 
+# === Load Model & Tokenizer ===
 def load_dependencies():
     global model, TOKENIZER
     model = load_model("lstm.h5")
-    data = pd.read_csv("news_dataset.csv")
-    if "Text" not in data.columns:
-        raise ValueError("CSV must have 'Text' column.")
+    df = pd.read_csv("news_dataset.csv")
     TOKENIZER = Tokenizer(num_words=5000)
-    TOKENIZER.fit_on_texts(data["Text"].values)
+    TOKENIZER.fit_on_texts(df["Text"].astype(str).values)
 
+# === Preprocessing ===
 def preprocess_text(text):
-    stop_words = set(stopwords.words('english'))
     tokens = word_tokenize(text.lower())
-    filtered_tokens = [word for word in tokens if word.isalnum() and word not in stop_words]
-    sequence = TOKENIZER.texts_to_sequences([" ".join(filtered_tokens)])
-    return pad_sequences(sequence, maxlen=max_length)
+    stop_words = set(stopwords.words("english"))
+    tokens = [t for t in tokens if t.isalnum() and t not in stop_words]
+    seq = TOKENIZER.texts_to_sequences([" ".join(tokens)])
+    return pad_sequences(seq, maxlen=max_length)
 
+# === Model Prediction ===
 def predict_news(text):
-    processed = preprocess_text(text)
-    prediction = model.predict(processed)
-    return "Real" if prediction.argmax(axis=1)[0] == 1 else "Fake"
+    seq = preprocess_text(text)
+    pred = model.predict(seq)
+    print("Prediction scores:", pred)  # Debug output
+    return "Real" if pred.argmax(axis=1)[0] == 1 else "Fake"
 
-def find_similar_news(input_text):
+# === Gemini Comparison ===
+def verify_with_gemini(original, matched):
+    prompt = f"""
+Compare the following two news headlines and check if they are semantically and factually the same.
+Pay close attention to numbers, names, and specific facts. Reply only with 'Yes' or 'No'.
+
+1. {original}
+2. {matched}
+"""
+    try:
+        model = genai.GenerativeModel("gemini-pro")
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print("Gemini Error:", e)
+        return "error"
+
+# === Find Matching News ===
+def find_similar_news(text):
     all_news = [item for df in news_data.values() for item in df["Content"].values]
     if not all_news:
         return None
     tfidf = TfidfVectorizer()
-    matrix = tfidf.fit_transform(all_news + [input_text])
+    matrix = tfidf.fit_transform(all_news + [text])
     similarities = cosine_similarity(matrix[-1], matrix[:-1]).flatten()
     max_sim = similarities.max()
     if max_sim >= similarity_threshold:
         return all_news[similarities.argmax()]
     return None
 
-def verify_with_gemini(input_text, matched_text):
-    prompt = f"""
-    Compare the following two news headlines and tell me if they mean the same thing. Reply with only 'Yes' or 'No'.
-
-    1. {input_text}
-    2. {matched_text}
-    """
-    response = genai.GenerativeModel('gemini-pro').generate_content(prompt)
-    return response.text.strip()
-
-def crawl_news(website):
+# === News Crawling ===
+def crawl_news(source):
     global news_data
-    config = WEB_CONFIG[website]
+    config = WEB_CONFIG[source]
     try:
-        response = requests.get(config["url"], timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
+        html = requests.get(config["url"], timeout=10).content
+        soup = BeautifulSoup(html, "html.parser")
         elements = soup.select(config["content_selector"])
         data = []
-        for idx, el in enumerate(elements[:20]):
-            content = el.get_text(strip=True)
-            if content:
+        for i, el in enumerate(elements[:20]):
+            txt = el.get_text(strip=True)
+            if txt:
                 data.append({
-                    "S.No": idx + 1,
-                    "Content": content,
+                    "S.No": i + 1,
+                    "Content": txt,
                     "Publisher": config["publisher"],
                     "Date": time.strftime("%Y-%m-%d")
                 })
-        news_data[website] = pd.DataFrame(data)
+        news_data[source] = pd.DataFrame(data)
     except Exception as e:
-        print(f"Error crawling {website}: {e}")
+        print(f"Error crawling {source}: {e}")
 
-def schedule_updates():
+# === Background News Fetching ===
+def schedule_news_crawling():
     while True:
-        for site in WEB_CONFIG:
-            print(f"Crawling {site}...")
-            crawl_news(site)
+        for source in WEB_CONFIG:
+            print(f"Fetching news from: {source}")
+            crawl_news(source)
         time.sleep(24 * 3600)
 
-@app.route("/", methods=["GET"])
+# === Flask Routes ===
+@app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, result=None)
 
 @app.route("/check", methods=["POST"])
 def check_news():
-    news = request.form["news"]
-    similar = find_similar_news(news)
-    if similar:
-        gemini_result = verify_with_gemini(news, similar)
-        if gemini_result.lower() == "no":
-            result = f"Fake (Gemini disagreed with match: '{similar[:100]}...')"
+    user_text = request.form["news"]
+    matched = find_similar_news(user_text)
+
+    if matched:
+        gemini_verdict = verify_with_gemini(user_text, matched)
+        if gemini_verdict.lower().strip() == "no":
+            result = f"Fake (Gemini disagreed: \"{matched[:100]}...\")"
+        elif gemini_verdict.lower().strip() == "yes":
+            result = f"Real (Matched with: \"{matched[:100]}...\")"
         else:
-            result = f"Real (Matched: '{similar[:100]}...')"
+            result = f"Uncertain (Gemini error or unclear response: \"{gemini_verdict}\")"
     else:
-        prediction = predict_news(news)
-        result = f"{prediction} (No match found)"
+        result = predict_news(user_text) + " (No similar headline found)"
+
     return render_template_string(HTML_TEMPLATE, result=result)
 
 @app.route("/health")
-def health():
+def health_check():
     return "OK", 200
 
+# === Start App ===
 if __name__ == "__main__":
     load_dependencies()
-    threading.Thread(target=schedule_updates, daemon=True).start()
+    threading.Thread(target=schedule_news_crawling, daemon=True).start()
     app.run(debug=True, port=5000)

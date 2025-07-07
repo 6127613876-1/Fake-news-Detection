@@ -8,3 +8,4 @@ selenium==4.11.2
 google-generativeai==0.4.1
 gunicorn==21.2.0
 beautifulsoup4==4.12.3
+requests
